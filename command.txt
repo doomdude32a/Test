@@ -1,1 +1,72 @@
 
+
+
+#!/bin/bash
+# Raspberry Pi: own WiFi hotspot + systemd service + xrdp
+# Run with: sudo bash setup-hotspot.sh
+set -e
+
+# ===== Settings =====
+SSID="PiNetz"
+PASS="SuperGeheim123"   # min. 8 characters
+IFACE="wlan0"
+CON="pi-hotspot"
+IP="10.42.0.1/24"
+COUNTRY="CH"
+# ====================
+
+if [ "$EUID" -ne 0 ]; then
+  echo "Please run with sudo: sudo bash $0"
+  exit 1
+fi
+
+echo "==> [1/5] Installing packages"
+apt update
+apt install -y xrdp dnsmasq-base
+
+echo "==> [2/5] Setting WiFi country"
+raspi-config nonint do_wifi_country "$COUNTRY"
+rfkill unblock wifi || true
+
+echo "==> [3/5] Creating hotspot profile"
+nmcli con delete "$CON" 2>/dev/null || true
+nmcli con add type wifi ifname "$IFACE" con-name "$CON" ssid "$SSID" \
+  connection.autoconnect no \
+  802-11-wireless.mode ap \
+  802-11-wireless.band bg \
+  ipv4.method shared \
+  ipv4.addresses "$IP" \
+  wifi-sec.key-mgmt wpa-psk \
+  wifi-sec.psk "$PASS" \
+  wifi-sec.proto rsn \
+  wifi-sec.pairwise ccmp \
+  wifi-sec.group ccmp
+
+echo "==> [4/5] Creating systemd service"
+cat > /etc/systemd/system/pi-hotspot.service << EOF
+[Unit]
+Description=WiFi hotspot $SSID
+After=NetworkManager.service
+Wants=NetworkManager.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/bin/nmcli con up $CON
+ExecStop=/usr/bin/nmcli con down $CON
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+systemctl daemon-reload
+systemctl enable pi-hotspot.service
+systemctl enable --now xrdp
+
+echo "==> [5/5] Starting hotspot"
+echo "    WiFi: $SSID | Password: $PASS | RDP: ${IP%/*}"
+echo "    If you're connected over WiFi, your connection drops now - that's normal."
+systemctl restart pi-hotspot.service
+echo "Done!"
